@@ -24,7 +24,6 @@ const LunchPicker = () => {
   const [timeUntilVoteEnd, setTimeUntilVoteEnd] = useState('');
   const [rerollSeed, setRerollSeed] = useState(0);
   const [excludedPickId, setExcludedPickId] = useState(null);
-  const [voteUpdateCounter, setVoteUpdateCounter] = useState(0); // 강제 리렌더링용
 
 
   // 투표 시간 체크 (9:00 ~ 12:00) + 오후 1시 자동 마감
@@ -60,57 +59,9 @@ const LunchPicker = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // 주기적 votes 동기화 (모바일 백업용)
-  useEffect(() => {
-    if (!currentUser) return;
-    
-    const syncVotes = async () => {
-      try {
-        const votesSnapshot = await getDocs(collection(db, 'votes'));
-        const data = {};
-        votesSnapshot.docs.forEach(doc => {
-          data[doc.id] = doc.data();
-        });
-        
-        setVotes(data);
-        setVoteUpdateCounter(prev => prev + 1);
-        console.log('🔄 전체 투표 동기화 완료');
-      } catch (error) {
-        console.error('주기적 동기화 실패:', error);
-      }
-    };
-    
-    // 즉시 한 번 실행
-    syncVotes();
-    
-    // 10초마다 동기화 (모바일용 - 더 자주)
-    const syncInterval = setInterval(syncVotes, 10000);
-    
-    // 페이지 포커스 시 즉시 동기화
-    const handleFocus = () => {
-      console.log('👁️ 페이지 포커스 - 즉시 동기화');
-      syncVotes();
-    };
-    
-    window.addEventListener('focus', handleFocus);
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) {
-        console.log('👁️ 페이지 보임 - 즉시 동기화');
-        syncVotes();
-      }
-    });
-    
-    return () => {
-      clearInterval(syncInterval);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [currentUser]);
-
   // Firebase 실시간 리스너
   useEffect(() => {
     if (!currentUser) return;
-
-    console.log('🔌 Firebase listeners 시작:', currentUser.username);
 
     const unsubRestaurants = onSnapshot(
       collection(db, 'restaurants'), 
@@ -118,9 +69,7 @@ const LunchPicker = () => {
         const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setRestaurants(data.sort((a, b) => (a.order || 0) - (b.order || 0)));
       },
-      (error) => {
-        console.error('❌ Restaurants listener error:', error);
-      }
+      (error) => console.error('Restaurants error:', error)
     );
 
     const unsubUsers = onSnapshot(
@@ -134,27 +83,21 @@ const LunchPicker = () => {
           setCurrentUser(updatedCurrentUser);
         }
       },
-      (error) => {
-        console.error('❌ Users listener error:', error);
-      }
+      (error) => console.error('Users error:', error)
     );
 
     const unsubVotes = onSnapshot(
       collection(db, 'votes'), 
       (snapshot) => {
-        console.log('🔥 Firebase votes 업데이트!');
         const data = {};
         snapshot.docs.forEach(doc => {
           data[doc.id] = doc.data();
         });
-        console.log('새로운 votes 데이터:', data);
         setVotes(data);
-        setVoteUpdateCounter(prev => prev + 1);
       },
       (error) => {
-        console.error('❌ Votes listener error:', error);
-        console.log('🔄 5초 후 votes 재로드 시도...');
-        // 에러 발생 시 5초 후 수동으로 다시 로드
+        console.error('Votes error:', error);
+        // 에러 시 재로드
         setTimeout(async () => {
           try {
             const votesSnapshot = await getDocs(collection(db, 'votes'));
@@ -163,12 +106,10 @@ const LunchPicker = () => {
               data[doc.id] = doc.data();
             });
             setVotes(data);
-            setVoteUpdateCounter(prev => prev + 1);
-            console.log('✅ Votes 수동 재로드 성공');
           } catch (err) {
-            console.error('❌ Votes 수동 재로드 실패:', err);
+            console.error('재로드 실패:', err);
           }
-        }, 5000);
+        }, 3000);
       }
     );
 
@@ -178,13 +119,10 @@ const LunchPicker = () => {
         const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setHistory(data.sort((a, b) => new Date(b.date) - new Date(a.date)));
       },
-      (error) => {
-        console.error('❌ History listener error:', error);
-      }
+      (error) => console.error('History error:', error)
     );
 
     return () => {
-      console.log('🔌 Firebase listeners 정리');
       unsubRestaurants();
       unsubUsers();
       unsubVotes();
@@ -320,8 +258,6 @@ const LunchPicker = () => {
   };
 
   const handleVote = async (restaurantId) => {
-    console.log('🗳️ 투표:', restaurantId);
-    
     if (!isVotingTime) {
       alert('투표는 오전 9시부터 12시까지만 가능합니다!');
       return;
@@ -329,19 +265,14 @@ const LunchPicker = () => {
 
     const today = new Date().toDateString();
     
-    // 1️⃣ 즉시 UI 업데이트 (낙관적 업데이트)
+    // 즉시 UI 업데이트 (낙관적 업데이트)
     setVotes(prev => {
       const todayVotes = prev[today] || {};
       const userVotes = todayVotes[currentUser.id] || [];
       
-      let newUserVotes;
-      if (userVotes.includes(restaurantId)) {
-        newUserVotes = userVotes.filter(id => id !== restaurantId);
-        console.log('❌ 투표 취소 (낙관적)');
-      } else {
-        newUserVotes = [...userVotes, restaurantId];
-        console.log('✅ 투표 추가 (낙관적)');
-      }
+      const newUserVotes = userVotes.includes(restaurantId)
+        ? userVotes.filter(id => id !== restaurantId)
+        : [...userVotes, restaurantId];
       
       return {
         ...prev,
@@ -351,10 +282,8 @@ const LunchPicker = () => {
         }
       };
     });
-    setVoteUpdateCounter(prev => prev + 1);
-    console.log('⚡ 즉시 UI 업데이트!');
     
-    // 2️⃣ Firebase에 저장
+    // Firebase에 저장
     const voteDocRef = doc(db, 'votes', today);
     try {
       const voteDoc = await getDoc(voteDocRef);
@@ -372,10 +301,9 @@ const LunchPicker = () => {
       }
       
       await setDoc(voteDocRef, voteData);
-      console.log('✅ Firebase 저장 완료!');
       
     } catch (error) {
-      console.error('❌ Vote error:', error);
+      console.error('투표 오류:', error);
       // 에러 발생 시 롤백
       const voteDocRef = doc(db, 'votes', today);
       const voteDoc = await getDoc(voteDocRef);
@@ -385,7 +313,7 @@ const LunchPicker = () => {
           [today]: voteDoc.data()
         }));
       }
-      alert('투표 중 오류가 발생했습니다: ' + error.message);
+      alert('투표 중 오류가 발생했습니다');
     }
   };
 
@@ -415,10 +343,7 @@ const LunchPicker = () => {
     
     try {
       const voteDoc = await getDoc(voteDocRef);
-      if (!voteDoc.exists()) {
-        console.log('투표 데이터 없음');
-        return;
-      }
+      if (!voteDoc.exists()) return;
       
       const voteData = voteDoc.data();
       
@@ -442,8 +367,6 @@ const LunchPicker = () => {
         : null;
       
       if (winnerId && maxVotes > 0) {
-        console.log(`✅ 오늘의 승자: ${winnerId} (${maxVotes}표)${topVotedIds.length > 1 ? ` - 공동 1위 ${topVotedIds.length}개 중 랜덤 선택` : ''}`);
-        
         // 모든 사용자의 히스토리에 추가
         const todayISO = new Date().toISOString().split('T')[0];
         const usersSnapshot = await getDocs(collection(db, 'users'));
@@ -463,10 +386,9 @@ const LunchPicker = () => {
       
       // 투표 데이터 삭제
       await deleteDoc(voteDocRef);
-      console.log('✅ 투표 데이터 초기화 완료');
       
     } catch (error) {
-      console.error('Auto close error:', error);
+      console.error('자동 마감 오류:', error);
     }
   };
 
@@ -594,7 +516,6 @@ const LunchPicker = () => {
       <main className="max-w-6xl mx-auto px-4 py-8">
         {view === 'home' && (
           <HomeView
-            key={voteUpdateCounter} // 강제 리렌더링
             restaurants={restaurants}
             votes={votes}
             currentUser={currentUser}
