@@ -60,42 +60,109 @@ const LunchPicker = () => {
     return () => clearInterval(interval);
   }, []);
 
+  // 주기적 votes 동기화 (모바일 백업용)
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    const syncVotes = async () => {
+      try {
+        const today = new Date().toDateString();
+        const voteDocRef = doc(db, 'votes', today);
+        const voteDoc = await getDoc(voteDocRef);
+        
+        if (voteDoc.exists()) {
+          const data = voteDoc.data();
+          setVotes(prev => ({
+            ...prev,
+            [today]: data
+          }));
+          console.log('🔄 주기적 동기화 완료');
+        }
+      } catch (error) {
+        console.error('주기적 동기화 실패:', error);
+      }
+    };
+    
+    // 30초마다 동기화
+    const syncInterval = setInterval(syncVotes, 30000);
+    
+    return () => clearInterval(syncInterval);
+  }, [currentUser]);
+
   // Firebase 실시간 리스너
   useEffect(() => {
     if (!currentUser) return;
 
-    const unsubRestaurants = onSnapshot(collection(db, 'restaurants'), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setRestaurants(data.sort((a, b) => (a.order || 0) - (b.order || 0)));
-    });
+    console.log('🔌 Firebase listeners 시작:', currentUser.username);
 
-    const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setUsers(data);
-      
-      const updatedCurrentUser = data.find(u => u.id === currentUser.id);
-      if (updatedCurrentUser) {
-        setCurrentUser(updatedCurrentUser);
+    const unsubRestaurants = onSnapshot(
+      collection(db, 'restaurants'), 
+      (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setRestaurants(data.sort((a, b) => (a.order || 0) - (b.order || 0)));
+      },
+      (error) => {
+        console.error('❌ Restaurants listener error:', error);
       }
-    });
+    );
 
-    const unsubVotes = onSnapshot(collection(db, 'votes'), (snapshot) => {
-      console.log('🔥 Firebase votes 업데이트!');
-      const data = {};
-      snapshot.docs.forEach(doc => {
-        data[doc.id] = doc.data();
-      });
-      console.log('새로운 votes 데이터:', data);
-      setVotes(data);
-      setVoteUpdateCounter(prev => prev + 1); // 강제 리렌더링
-    });
+    const unsubUsers = onSnapshot(
+      collection(db, 'users'), 
+      (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setUsers(data);
+        
+        const updatedCurrentUser = data.find(u => u.id === currentUser.id);
+        if (updatedCurrentUser) {
+          setCurrentUser(updatedCurrentUser);
+        }
+      },
+      (error) => {
+        console.error('❌ Users listener error:', error);
+      }
+    );
 
-    const unsubHistory = onSnapshot(collection(db, 'history'), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setHistory(data.sort((a, b) => new Date(b.date) - new Date(a.date)));
-    });
+    const unsubVotes = onSnapshot(
+      collection(db, 'votes'), 
+      (snapshot) => {
+        console.log('🔥 Firebase votes 업데이트!');
+        const data = {};
+        snapshot.docs.forEach(doc => {
+          data[doc.id] = doc.data();
+        });
+        console.log('새로운 votes 데이터:', data);
+        setVotes(data);
+        setVoteUpdateCounter(prev => prev + 1);
+      },
+      (error) => {
+        console.error('❌ Votes listener error:', error);
+        // 에러 발생 시 수동으로 다시 로드
+        setTimeout(() => {
+          getDocs(collection(db, 'votes')).then(snapshot => {
+            const data = {};
+            snapshot.docs.forEach(doc => {
+              data[doc.id] = doc.data();
+            });
+            setVotes(data);
+            setVoteUpdateCounter(prev => prev + 1);
+          });
+        }, 2000);
+      }
+    );
+
+    const unsubHistory = onSnapshot(
+      collection(db, 'history'), 
+      (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setHistory(data.sort((a, b) => new Date(b.date) - new Date(a.date)));
+      },
+      (error) => {
+        console.error('❌ History listener error:', error);
+      }
+    );
 
     return () => {
+      console.log('🔌 Firebase listeners 정리');
       unsubRestaurants();
       unsubUsers();
       unsubVotes();
@@ -261,7 +328,7 @@ const LunchPicker = () => {
       await setDoc(voteDocRef, voteData);
       console.log('✅ 저장 완료!');
       
-      // 수동으로 votes state 업데이트 (voteData를 변수로 저장)
+      // 즉시 로컬 state 업데이트
       const updatedVoteData = { ...voteData };
       setVotes(prev => ({
         ...prev,
@@ -269,6 +336,24 @@ const LunchPicker = () => {
       }));
       setVoteUpdateCounter(prev => prev + 1);
       console.log('🔄 UI 강제 업데이트!');
+      
+      // 500ms 후 Firebase에서 다시 가져와서 동기화 확인
+      setTimeout(async () => {
+        try {
+          const freshVoteDoc = await getDoc(voteDocRef);
+          if (freshVoteDoc.exists()) {
+            const freshData = freshVoteDoc.data();
+            setVotes(prev => ({
+              ...prev,
+              [today]: freshData
+            }));
+            setVoteUpdateCounter(prev => prev + 1);
+            console.log('🔄 Firebase 재동기화 완료');
+          }
+        } catch (err) {
+          console.error('재동기화 실패:', err);
+        }
+      }, 500);
       
     } catch (error) {
       console.error('❌ Vote error:', error);
