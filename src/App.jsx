@@ -59,33 +59,11 @@ const LunchPicker = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Firebase 실시간 리스너
+  // Firebase 실시간 리스너 - votes만 실시간 동기화
   useEffect(() => {
     if (!currentUser) return;
 
-    const unsubRestaurants = onSnapshot(
-      collection(db, 'restaurants'), 
-      (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setRestaurants(data.sort((a, b) => (a.order || 0) - (b.order || 0)));
-      },
-      (error) => console.error('Restaurants error:', error)
-    );
-
-    const unsubUsers = onSnapshot(
-      collection(db, 'users'), 
-      (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setUsers(data);
-        
-        const updatedCurrentUser = data.find(u => u.id === currentUser.id);
-        if (updatedCurrentUser) {
-          setCurrentUser(updatedCurrentUser);
-        }
-      },
-      (error) => console.error('Users error:', error)
-    );
-
+    // votes만 실시간 listener (가장 중요!)
     const unsubVotes = onSnapshot(
       collection(db, 'votes'), 
       (snapshot) => {
@@ -94,40 +72,40 @@ const LunchPicker = () => {
           data[doc.id] = doc.data();
         });
         setVotes(data);
-      },
-      (error) => {
-        console.error('Votes error:', error);
-        // 에러 시 재로드
-        setTimeout(async () => {
-          try {
-            const votesSnapshot = await getDocs(collection(db, 'votes'));
-            const data = {};
-            votesSnapshot.docs.forEach(doc => {
-              data[doc.id] = doc.data();
-            });
-            setVotes(data);
-          } catch (err) {
-            console.error('재로드 실패:', err);
-          }
-        }, 3000);
       }
     );
 
-    const unsubHistory = onSnapshot(
-      collection(db, 'history'), 
-      (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setHistory(data.sort((a, b) => new Date(b.date) - new Date(a.date)));
-      },
-      (error) => console.error('History error:', error)
-    );
-
     return () => {
-      unsubRestaurants();
-      unsubUsers();
       unsubVotes();
-      unsubHistory();
     };
+  }, [currentUser]);
+
+  // 나머지 데이터는 로그인 시 한 번만 로드
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const loadData = async () => {
+      try {
+        // restaurants
+        const restaurantsSnapshot = await getDocs(collection(db, 'restaurants'));
+        const restaurantsData = restaurantsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setRestaurants(restaurantsData.sort((a, b) => (a.order || 0) - (b.order || 0)));
+
+        // users
+        const usersSnapshot = await getDocs(collection(db, 'users'));
+        const usersData = usersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setUsers(usersData);
+
+        // history
+        const historySnapshot = await getDocs(collection(db, 'history'));
+        const historyData = historySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setHistory(historyData.sort((a, b) => new Date(b.date) - new Date(a.date)));
+      } catch (error) {
+        console.error('데이터 로드 실패:', error);
+      }
+    };
+
+    loadData();
   }, [currentUser]);
 
   // 초기 데이터 로드
@@ -317,6 +295,16 @@ const LunchPicker = () => {
     }
   };
 
+  const refreshRestaurants = async () => {
+    try {
+      const restaurantsSnapshot = await getDocs(collection(db, 'restaurants'));
+      const restaurantsData = restaurantsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setRestaurants(restaurantsData.sort((a, b) => (a.order || 0) - (b.order || 0)));
+    } catch (error) {
+      console.error('밥집 갱신 실패:', error);
+    }
+  };
+
   const recordLunch = async (restaurantId) => {
     const today = new Date().toISOString().split('T')[0];
     const historyId = `${today}_${currentUser.id}_${Date.now()}`;
@@ -328,6 +316,11 @@ const LunchPicker = () => {
         userId: currentUser.id,
         timestamp: serverTimestamp()
       });
+      
+      // history 다시 로드
+      const historySnapshot = await getDocs(collection(db, 'history'));
+      const historyData = historySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setHistory(historyData.sort((a, b) => new Date(b.date) - new Date(a.date)));
       
       alert('기록되었습니다!');
     } catch (error) {
@@ -532,7 +525,7 @@ const LunchPicker = () => {
           />
         )}
         {view === 'restaurant' && currentUser.isAdmin && (
-          <RestaurantView restaurants={restaurants} />
+          <RestaurantView restaurants={restaurants} onRefresh={refreshRestaurants} />
         )}
         {view === 'profile' && (
           <ProfileView
@@ -924,7 +917,7 @@ const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getR
 };
 
 // RestaurantView Component
-const RestaurantView = ({ restaurants }) => {
+const RestaurantView = ({ restaurants, onRefresh }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [newRestaurant, setNewRestaurant] = useState({
     name: '', category: '한식', heaviness: '보통', price: 1, emoji: '🍚',
@@ -945,6 +938,7 @@ const RestaurantView = ({ restaurants }) => {
         
         setNewRestaurant({ name: '', category: '한식', heaviness: '보통', price: 1, emoji: '🍚', naverMapUrl: '', kakaoMapUrl: '' });
         setIsAdding(false);
+        await onRefresh(); // 갱신!
         alert('밥집이 추가되었습니다!');
       } catch (error) {
         console.error('Add restaurant error:', error);
@@ -957,6 +951,7 @@ const RestaurantView = ({ restaurants }) => {
     if (confirm('정말 삭제하시겠습니까?')) {
       try {
         await deleteDoc(doc(db, 'restaurants', id));
+        await onRefresh(); // 갱신!
         alert('밥집이 삭제되었습니다!');
       } catch (error) {
         console.error('Delete restaurant error:', error);
