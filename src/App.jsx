@@ -66,27 +66,44 @@ const LunchPicker = () => {
     
     const syncVotes = async () => {
       try {
-        const today = new Date().toDateString();
-        const voteDocRef = doc(db, 'votes', today);
-        const voteDoc = await getDoc(voteDocRef);
+        const votesSnapshot = await getDocs(collection(db, 'votes'));
+        const data = {};
+        votesSnapshot.docs.forEach(doc => {
+          data[doc.id] = doc.data();
+        });
         
-        if (voteDoc.exists()) {
-          const data = voteDoc.data();
-          setVotes(prev => ({
-            ...prev,
-            [today]: data
-          }));
-          console.log('🔄 주기적 동기화 완료');
-        }
+        setVotes(data);
+        setVoteUpdateCounter(prev => prev + 1);
+        console.log('🔄 전체 투표 동기화 완료');
       } catch (error) {
         console.error('주기적 동기화 실패:', error);
       }
     };
     
-    // 30초마다 동기화
-    const syncInterval = setInterval(syncVotes, 30000);
+    // 즉시 한 번 실행
+    syncVotes();
     
-    return () => clearInterval(syncInterval);
+    // 10초마다 동기화 (모바일용 - 더 자주)
+    const syncInterval = setInterval(syncVotes, 10000);
+    
+    // 페이지 포커스 시 즉시 동기화
+    const handleFocus = () => {
+      console.log('👁️ 페이지 포커스 - 즉시 동기화');
+      syncVotes();
+    };
+    
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        console.log('👁️ 페이지 보임 - 즉시 동기화');
+        syncVotes();
+      }
+    });
+    
+    return () => {
+      clearInterval(syncInterval);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [currentUser]);
 
   // Firebase 실시간 리스너
@@ -136,17 +153,22 @@ const LunchPicker = () => {
       },
       (error) => {
         console.error('❌ Votes listener error:', error);
-        // 에러 발생 시 수동으로 다시 로드
-        setTimeout(() => {
-          getDocs(collection(db, 'votes')).then(snapshot => {
+        console.log('🔄 5초 후 votes 재로드 시도...');
+        // 에러 발생 시 5초 후 수동으로 다시 로드
+        setTimeout(async () => {
+          try {
+            const votesSnapshot = await getDocs(collection(db, 'votes'));
             const data = {};
-            snapshot.docs.forEach(doc => {
+            votesSnapshot.docs.forEach(doc => {
               data[doc.id] = doc.data();
             });
             setVotes(data);
             setVoteUpdateCounter(prev => prev + 1);
-          });
-        }, 2000);
+            console.log('✅ Votes 수동 재로드 성공');
+          } catch (err) {
+            console.error('❌ Votes 수동 재로드 실패:', err);
+          }
+        }, 5000);
       }
     );
 
@@ -306,8 +328,34 @@ const LunchPicker = () => {
     }
 
     const today = new Date().toDateString();
-    const voteDocRef = doc(db, 'votes', today);
     
+    // 1️⃣ 즉시 UI 업데이트 (낙관적 업데이트)
+    setVotes(prev => {
+      const todayVotes = prev[today] || {};
+      const userVotes = todayVotes[currentUser.id] || [];
+      
+      let newUserVotes;
+      if (userVotes.includes(restaurantId)) {
+        newUserVotes = userVotes.filter(id => id !== restaurantId);
+        console.log('❌ 투표 취소 (낙관적)');
+      } else {
+        newUserVotes = [...userVotes, restaurantId];
+        console.log('✅ 투표 추가 (낙관적)');
+      }
+      
+      return {
+        ...prev,
+        [today]: {
+          ...todayVotes,
+          [currentUser.id]: newUserVotes
+        }
+      };
+    });
+    setVoteUpdateCounter(prev => prev + 1);
+    console.log('⚡ 즉시 UI 업데이트!');
+    
+    // 2️⃣ Firebase에 저장
+    const voteDocRef = doc(db, 'votes', today);
     try {
       const voteDoc = await getDoc(voteDocRef);
       let voteData = voteDoc.exists() ? voteDoc.data() : {};
@@ -319,44 +367,24 @@ const LunchPicker = () => {
       const userVotes = voteData[currentUser.id];
       if (userVotes.includes(restaurantId)) {
         voteData[currentUser.id] = userVotes.filter(id => id !== restaurantId);
-        console.log('❌ 투표 취소');
       } else {
         voteData[currentUser.id] = [...userVotes, restaurantId];
-        console.log('✅ 투표 추가');
       }
       
       await setDoc(voteDocRef, voteData);
-      console.log('✅ 저장 완료!');
-      
-      // 즉시 로컬 state 업데이트
-      const updatedVoteData = { ...voteData };
-      setVotes(prev => ({
-        ...prev,
-        [today]: updatedVoteData
-      }));
-      setVoteUpdateCounter(prev => prev + 1);
-      console.log('🔄 UI 강제 업데이트!');
-      
-      // 500ms 후 Firebase에서 다시 가져와서 동기화 확인
-      setTimeout(async () => {
-        try {
-          const freshVoteDoc = await getDoc(voteDocRef);
-          if (freshVoteDoc.exists()) {
-            const freshData = freshVoteDoc.data();
-            setVotes(prev => ({
-              ...prev,
-              [today]: freshData
-            }));
-            setVoteUpdateCounter(prev => prev + 1);
-            console.log('🔄 Firebase 재동기화 완료');
-          }
-        } catch (err) {
-          console.error('재동기화 실패:', err);
-        }
-      }, 500);
+      console.log('✅ Firebase 저장 완료!');
       
     } catch (error) {
       console.error('❌ Vote error:', error);
+      // 에러 발생 시 롤백
+      const voteDocRef = doc(db, 'votes', today);
+      const voteDoc = await getDoc(voteDocRef);
+      if (voteDoc.exists()) {
+        setVotes(prev => ({
+          ...prev,
+          [today]: voteDoc.data()
+        }));
+      }
       alert('투표 중 오류가 발생했습니다: ' + error.message);
     }
   };
