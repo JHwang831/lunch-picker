@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Calendar, Users, TrendingUp, Settings, Plus, Check, X, Filter, Star, MapPin, Clock, Crown, Trophy, RefreshCw } from 'lucide-react';
 import { db } from './firebase';
 import { 
@@ -24,13 +24,19 @@ const LunchPicker = () => {
   const [timeUntilVoteEnd, setTimeUntilVoteEnd] = useState('');
   const [rerollSeed, setRerollSeed] = useState(0);
   const [excludedPickId, setExcludedPickId] = useState(null);
+  const [voteUpdateCounter, setVoteUpdateCounter] = useState(0); // 강제 리렌더링용
 
 
-  // 투표 시간 체크 (9:00 ~ 12:00)
+  // 투표 시간 체크 (9:00 ~ 12:00) + 오후 1시 자동 마감
   useEffect(() => {
-    const checkVotingTime = () => {
+    const checkVotingTime = async () => {
       const now = new Date();
       const hours = now.getHours();
+      
+      // 오후 1시 자동 마감 체크
+      if (hours === 13 && now.getMinutes() === 0) {
+        await autoCloseDailyVote();
+      }
       
       const isWithinVotingHours = hours >= 9 && hours < 12;
       setIsVotingTime(isWithinVotingHours);
@@ -74,11 +80,14 @@ const LunchPicker = () => {
     });
 
     const unsubVotes = onSnapshot(collection(db, 'votes'), (snapshot) => {
+      console.log('🔥 Firebase votes 업데이트!');
       const data = {};
       snapshot.docs.forEach(doc => {
         data[doc.id] = doc.data();
       });
+      console.log('새로운 votes 데이터:', data);
       setVotes(data);
+      setVoteUpdateCounter(prev => prev + 1); // 강제 리렌더링
     });
 
     const unsubHistory = onSnapshot(collection(db, 'history'), (snapshot) => {
@@ -222,6 +231,8 @@ const LunchPicker = () => {
   };
 
   const handleVote = async (restaurantId) => {
+    console.log('🗳️ 투표:', restaurantId);
+    
     if (!isVotingTime) {
       alert('투표는 오전 9시부터 12시까지만 가능합니다!');
       return;
@@ -241,14 +252,27 @@ const LunchPicker = () => {
       const userVotes = voteData[currentUser.id];
       if (userVotes.includes(restaurantId)) {
         voteData[currentUser.id] = userVotes.filter(id => id !== restaurantId);
+        console.log('❌ 투표 취소');
       } else {
         voteData[currentUser.id] = [...userVotes, restaurantId];
+        console.log('✅ 투표 추가');
       }
       
       await setDoc(voteDocRef, voteData);
+      console.log('✅ 저장 완료!');
+      
+      // 수동으로 votes state 업데이트 (voteData를 변수로 저장)
+      const updatedVoteData = { ...voteData };
+      setVotes(prev => ({
+        ...prev,
+        [today]: updatedVoteData
+      }));
+      setVoteUpdateCounter(prev => prev + 1);
+      console.log('🔄 UI 강제 업데이트!');
+      
     } catch (error) {
-      console.error('Vote error:', error);
-      alert('투표 중 오류가 발생했습니다');
+      console.error('❌ Vote error:', error);
+      alert('투표 중 오류가 발생했습니다: ' + error.message);
     }
   };
 
@@ -268,6 +292,68 @@ const LunchPicker = () => {
     } catch (error) {
       console.error('Record lunch error:', error);
       alert('기록 중 오류가 발생했습니다');
+    }
+  };
+
+  // 오후 1시 자동 마감 - 1위 밥집 히스토리에 저장 및 투표 초기화
+  const autoCloseDailyVote = async () => {
+    const today = new Date().toDateString();
+    const voteDocRef = doc(db, 'votes', today);
+    
+    try {
+      const voteDoc = await getDoc(voteDocRef);
+      if (!voteDoc.exists()) {
+        console.log('투표 데이터 없음');
+        return;
+      }
+      
+      const voteData = voteDoc.data();
+      
+      // 투표수 집계
+      const voteCounts = {};
+      Object.values(voteData).forEach(userVotes => {
+        userVotes.forEach(restaurantId => {
+          voteCounts[restaurantId] = (voteCounts[restaurantId] || 0) + 1;
+        });
+      });
+      
+      // 공동 1위 찾기
+      const maxVotes = Math.max(...Object.values(voteCounts), 0);
+      const topVotedIds = Object.entries(voteCounts)
+        .filter(([id, count]) => count === maxVotes && count > 0)
+        .map(([id]) => id);
+      
+      // 공동 1위일 경우 랜덤 선택
+      const winnerId = topVotedIds.length > 0 
+        ? topVotedIds[Math.floor(Math.random() * topVotedIds.length)]
+        : null;
+      
+      if (winnerId && maxVotes > 0) {
+        console.log(`✅ 오늘의 승자: ${winnerId} (${maxVotes}표)${topVotedIds.length > 1 ? ` - 공동 1위 ${topVotedIds.length}개 중 랜덤 선택` : ''}`);
+        
+        // 모든 사용자의 히스토리에 추가
+        const todayISO = new Date().toISOString().split('T')[0];
+        const usersSnapshot = await getDocs(collection(db, 'users'));
+        
+        for (const userDoc of usersSnapshot.docs) {
+          const historyId = `${todayISO}_${userDoc.id}_auto_${Date.now()}`;
+          await setDoc(doc(db, 'history', historyId), {
+            date: todayISO,
+            restaurantId: winnerId,
+            userId: userDoc.id,
+            timestamp: serverTimestamp(),
+            isAutomatic: true,
+            voteCount: maxVotes
+          });
+        }
+      }
+      
+      // 투표 데이터 삭제
+      await deleteDoc(voteDocRef);
+      console.log('✅ 투표 데이터 초기화 완료');
+      
+    } catch (error) {
+      console.error('Auto close error:', error);
     }
   };
 
@@ -395,6 +481,7 @@ const LunchPicker = () => {
       <main className="max-w-6xl mx-auto px-4 py-8">
         {view === 'home' && (
           <HomeView
+            key={voteUpdateCounter} // 강제 리렌더링
             restaurants={restaurants}
             votes={votes}
             currentUser={currentUser}
@@ -526,16 +613,19 @@ const LoginScreen = ({ onLogin }) => {
 // HomeView Component
 const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getRecommendations, onRecordLunch, isVotingTime, timeUntilVoteEnd, onReroll }) => {
   const [filter, setFilter] = useState({ category: 'all', heaviness: 'all', price: 'all' });
-  const voteCounts = getTodayVotes();
+  
   const today = new Date().toDateString();
+  const voteCounts = getTodayVotes();
   const userVotes = votes[today]?.[currentUser.id] || [];
   const recommendations = getRecommendations();
   const topPick = recommendations[0];
 
-  // 투표 1위 찾기
-  const topVoted = Object.entries(voteCounts).reduce((max, [id, count]) => 
-    count > (max.count || 0) ? { id, count } : max
-  , {});
+  // 공동 1위 찾기
+  const maxVotes = Math.max(...Object.values(voteCounts), 0);
+  const topVotedIds = Object.entries(voteCounts)
+    .filter(([id, count]) => count === maxVotes && count > 0)
+    .map(([id]) => id);
+  const topVotedRestaurants = topVotedIds.map(id => restaurants.find(r => r.id === id)).filter(Boolean);
 
   const filteredRestaurants = restaurants.filter(restaurant => {
     if (filter.category !== 'all' && restaurant.category !== filter.category) return false;
@@ -690,11 +780,15 @@ const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getR
             <Users size={24} />
             오늘의 투표
           </h2>
-          {topVoted.id && (
+          {topVotedRestaurants.length > 0 && (
             <div className="flex items-center gap-2 bg-yellow-100 px-4 py-2 rounded-full">
               <Trophy size={20} className="text-yellow-600" />
               <span className="font-bold text-yellow-900">
-                현재 1위: {restaurants.find(r => r.id === topVoted.id)?.name}
+                {topVotedRestaurants.length === 1 ? (
+                  <>현재 1위: {topVotedRestaurants[0].name} ({maxVotes}표)</>
+                ) : (
+                  <>공동 1위 ({maxVotes}표): {topVotedRestaurants.map(r => r.name).join(', ')}</>
+                )}
               </span>
             </div>
           )}
@@ -703,7 +797,7 @@ const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getR
           {filteredRestaurants.map(restaurant => {
             const voteCount = voteCounts[restaurant.id] || 0;
             const hasVoted = userVotes.includes(restaurant.id);
-            const isTopVoted = topVoted.id === restaurant.id && voteCount > 0;
+            const isTopVoted = topVotedIds.includes(restaurant.id) && voteCount > 0;
 
             return (
               <div
