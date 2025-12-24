@@ -23,6 +23,7 @@ const LunchPicker = () => {
   const [isVotingTime, setIsVotingTime] = useState(false);
   const [timeUntilVoteEnd, setTimeUntilVoteEnd] = useState('');
   const [rerollSeed, setRerollSeed] = useState(0);
+  const [excludedPickId, setExcludedPickId] = useState(null);
 
 
   // 투표 시간 체크 (9:00 ~ 12:00)
@@ -288,7 +289,10 @@ const LunchPicker = () => {
     };
     
     return restaurants
-      .filter(restaurant => !userPrefs.disliked.includes(restaurant.id))
+      .filter(restaurant => 
+        !userPrefs.disliked.includes(restaurant.id) && 
+        restaurant.id !== excludedPickId  // 이전 추천 제외
+      )
       .map(restaurant => {
         const lastEaten = history
           .filter(h => h.restaurantId === restaurant.id)
@@ -400,7 +404,10 @@ const LunchPicker = () => {
             onRecordLunch={recordLunch}
             isVotingTime={isVotingTime}
             timeUntilVoteEnd={timeUntilVoteEnd}
-            onReroll={() => setRerollSeed(prev => prev + 1)}
+            onReroll={(currentPickId) => {
+              setExcludedPickId(currentPickId);
+              setRerollSeed(prev => prev + 1);
+            }}
           />
         )}
         {view === 'restaurant' && currentUser.isAdmin && (
@@ -568,7 +575,7 @@ const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getR
             </h2>
             <div className="flex gap-2">
               <button
-                onClick={onReroll}
+                onClick={() => onReroll(topPick.id)}
                 className="bg-white/80 text-orange-600 px-4 py-2 rounded-full font-semibold hover:bg-white transition-all flex items-center gap-2"
                 title="다른 추천 보기"
               >
