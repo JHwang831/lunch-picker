@@ -59,27 +59,6 @@ const LunchPicker = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Firebase 실시간 리스너 - votes만 실시간 동기화
-  useEffect(() => {
-    if (!currentUser) return;
-
-    // votes만 실시간 listener (가장 중요!)
-    const unsubVotes = onSnapshot(
-      collection(db, 'votes'), 
-      (snapshot) => {
-        const data = {};
-        snapshot.docs.forEach(doc => {
-          data[doc.id] = doc.data();
-        });
-        setVotes(data);
-      }
-    );
-
-    return () => {
-      unsubVotes();
-    };
-  }, [currentUser]);
-
   // 나머지 데이터는 로그인 시 한 번만 로드
   useEffect(() => {
     if (!currentUser) return;
@@ -100,6 +79,14 @@ const LunchPicker = () => {
         const historySnapshot = await getDocs(collection(db, 'history'));
         const historyData = historySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setHistory(historyData.sort((a, b) => new Date(b.date) - new Date(a.date)));
+
+        // votes (초기 로드만)
+        const votesSnapshot = await getDocs(collection(db, 'votes'));
+        const votesData = {};
+        votesSnapshot.docs.forEach(doc => {
+          votesData[doc.id] = doc.data();
+        });
+        setVotes(votesData);
       } catch (error) {
         console.error('데이터 로드 실패:', error);
       }
@@ -302,6 +289,19 @@ const LunchPicker = () => {
       setRestaurants(restaurantsData.sort((a, b) => (a.order || 0) - (b.order || 0)));
     } catch (error) {
       console.error('밥집 갱신 실패:', error);
+    }
+  };
+
+  const refreshVotes = async () => {
+    try {
+      const votesSnapshot = await getDocs(collection(db, 'votes'));
+      const votesData = {};
+      votesSnapshot.docs.forEach(doc => {
+        votesData[doc.id] = doc.data();
+      });
+      setVotes(votesData);
+    } catch (error) {
+      console.error('투표 갱신 실패:', error);
     }
   };
 
@@ -516,12 +516,9 @@ const LunchPicker = () => {
             getTodayVotes={getTodayVotes}
             getRecommendations={getRecommendations}
             onRecordLunch={recordLunch}
+            onRefreshVotes={refreshVotes}
             isVotingTime={isVotingTime}
             timeUntilVoteEnd={timeUntilVoteEnd}
-            onReroll={(currentPickId) => {
-              setExcludedPickId(currentPickId);
-              setRerollSeed(prev => prev + 1);
-            }}
           />
         )}
         {view === 'restaurant' && currentUser.isAdmin && (
@@ -535,7 +532,17 @@ const LunchPicker = () => {
           />
         )}
         {view === 'history' && (
-          <HistoryView history={history} restaurants={restaurants} users={users} />
+          <HistoryView 
+            history={history} 
+            restaurants={restaurants} 
+            users={users} 
+            currentUser={currentUser}
+            onRefreshHistory={async () => {
+              const historySnapshot = await getDocs(collection(db, 'history'));
+              const historyData = historySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+              setHistory(historyData.sort((a, b) => new Date(b.date) - new Date(a.date)));
+            }}
+          />
         )}
       </main>
     </div>
@@ -638,14 +645,61 @@ const LoginScreen = ({ onLogin }) => {
 };
 
 // HomeView Component
-const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getRecommendations, onRecordLunch, isVotingTime, timeUntilVoteEnd, onReroll }) => {
+const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getRecommendations, onRecordLunch, onRefreshVotes, isVotingTime, timeUntilVoteEnd }) => {
   const [filter, setFilter] = useState({ category: 'all', heaviness: 'all', price: 'all' });
+  const [isSpinning, setIsSpinning] = useState(false);
+  const [spinningEmoji, setSpinningEmoji] = useState('🍱');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [randomPick, setRandomPick] = useState(null); // 랜덤 선택된 밥집
   
   const today = new Date().toDateString();
   const voteCounts = getTodayVotes();
   const userVotes = votes[today]?.[currentUser.id] || [];
   const recommendations = getRecommendations();
-  const topPick = recommendations[0];
+  
+  // 화면에 표시할 추천 (랜덤 선택이 있으면 그거, 없으면 AI 추천)
+  const displayPick = randomPick || recommendations[0];
+
+  // 슬롯머신 이펙트로 랜덤 보여주기 (히스토리 기록 X)
+  const handleRandomPick = () => {
+    setIsSpinning(true);
+    const emojis = restaurants.map(r => r.emoji);
+    let counter = 0;
+    const maxSpins = 12;
+    
+    const spinInterval = setInterval(() => {
+      const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+      setSpinningEmoji(randomEmoji);
+      counter++;
+      
+      if (counter >= maxSpins) {
+        clearInterval(spinInterval);
+        // 최종 랜덤 선택
+        const randomIndex = Math.floor(Math.random() * restaurants.length);
+        const finalPick = restaurants[randomIndex];
+        setSpinningEmoji(finalPick.emoji);
+        setTimeout(() => {
+          setIsSpinning(false);
+          setRandomPick(finalPick); // 랜덤 선택 결과 저장
+        }, 300);
+      }
+    }, 80);
+  };
+
+  // 투표하기
+  const handleVoteClick = async () => {
+    if (!displayPick) return;
+    
+    await onVote(displayPick.id);
+    alert('투표되었습니다!');
+  };
+
+  // 투표 새로고침
+  const handleRefreshVotes = async () => {
+    setIsRefreshing(true);
+    await onRefreshVotes();
+    setTimeout(() => setIsRefreshing(false), 500);
+  };
 
   // 공동 1위 찾기
   const maxVotes = Math.max(...Object.values(voteCounts), 0);
@@ -684,46 +738,66 @@ const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getR
       </div>
 
       {/* AI Recommendation */}
-      {topPick && (
+      {displayPick && (
         <div className="bg-gradient-to-r from-orange-400 to-amber-400 rounded-3xl p-8 text-white shadow-2xl transform hover:scale-105 transition-transform">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-3xl font-bold" style={{ fontFamily: 'Georgia, serif' }}>
-              🎯 오늘의 AI 추천
+              {randomPick ? '🎲 랜덤 추천' : '🎯 오늘의 AI 추천'}
             </h2>
             <div className="flex gap-2">
               <button
-                onClick={() => onReroll(topPick.id)}
-                className="bg-white/80 text-orange-600 px-4 py-2 rounded-full font-semibold hover:bg-white transition-all flex items-center gap-2"
-                title="다른 추천 보기"
+                onClick={handleRandomPick}
+                disabled={isSpinning}
+                className="bg-white text-orange-600 px-4 py-2 rounded-full font-semibold hover:bg-orange-50 transition-colors disabled:opacity-50 flex items-center gap-2"
               >
-                <RefreshCw size={18} />
-                리롤
+                {isSpinning ? (
+                  <>
+                    <RefreshCw size={18} className="animate-spin" />
+                    선택 중...
+                  </>
+                ) : (
+                  <>
+                    🎲 랜덤 선택
+                  </>
+                )}
               </button>
               <button
-                onClick={() => onRecordLunch(topPick.id)}
-                className="bg-white text-orange-600 px-4 py-2 rounded-full font-semibold hover:bg-orange-50 transition-colors"
+                onClick={handleVoteClick}
+                disabled={!isVotingTime || isSpinning}
+                className="bg-white/80 text-orange-600 px-4 py-2 rounded-full font-semibold hover:bg-white transition-all flex items-center gap-2 disabled:opacity-50"
+                title={!isVotingTime ? '투표 시간이 아닙니다' : '이 밥집에 투표하기'}
               >
-                선택완료
+                <Check size={18} />
+                투표하기
               </button>
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <div className="text-7xl">{topPick.emoji}</div>
+            <div className={`text-7xl ${isSpinning ? 'animate-bounce' : ''}`}>
+              {isSpinning ? spinningEmoji : displayPick.emoji}
+            </div>
             <div className="flex-1">
-              <h3 className="text-4xl font-bold mb-2">{topPick.name}</h3>
-              <div className="flex gap-3 text-sm mb-3">
-                <span className="bg-white/30 px-3 py-1 rounded-full">{topPick.category}</span>
-                <span className="bg-white/30 px-3 py-1 rounded-full">{topPick.heaviness}</span>
-                <span className="bg-white/30 px-3 py-1 rounded-full">{'₩'.repeat(topPick.price)}</span>
-              </div>
-              {topPick.daysSince < 999 && (
-                <p className="text-white/80">마지막으로 먹은지 {topPick.daysSince}일 지남</p>
+              <h3 className="text-4xl font-bold mb-2">{isSpinning ? '???' : displayPick.name}</h3>
+              {!isSpinning && (
+                <>
+                  <div className="flex gap-3 text-sm mb-3">
+                    <span className="bg-white/30 px-3 py-1 rounded-full">{displayPick.category}</span>
+                    <span className="bg-white/30 px-3 py-1 rounded-full">{displayPick.heaviness}</span>
+                    <span className="bg-white/30 px-3 py-1 rounded-full">{'₩'.repeat(displayPick.price)}</span>
+                  </div>
+                  {displayPick.daysSince && displayPick.daysSince < 999 && (
+                    <p className="text-white/80">마지막으로 먹은지 {displayPick.daysSince}일 지남</p>
+                  )}
+                </>
               )}
-              {(topPick.naverMapUrl || topPick.kakaoMapUrl) && (
+              {isSpinning && (
+                <p className="text-white/90 text-lg animate-pulse">슬롯머신 돌리는 중...</p>
+              )}
+              {!isSpinning && (displayPick.naverMapUrl || displayPick.kakaoMapUrl) && (
                 <div className="flex gap-2 mt-3">
-                  {topPick.naverMapUrl && (
+                  {displayPick.naverMapUrl && (
                     <a
-                      href={topPick.naverMapUrl}
+                      href={displayPick.naverMapUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-1 bg-white/90 text-green-600 px-3 py-1 rounded-full text-sm font-semibold hover:bg-white transition-colors"
@@ -732,9 +806,9 @@ const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getR
                       네이버지도
                     </a>
                   )}
-                  {topPick.kakaoMapUrl && (
+                  {displayPick.kakaoMapUrl && (
                     <a
-                      href={topPick.kakaoMapUrl}
+                      href={displayPick.kakaoMapUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center gap-1 bg-white/90 text-yellow-600 px-3 py-1 rounded-full text-sm font-semibold hover:bg-white transition-colors"
@@ -803,10 +877,21 @@ const HomeView = ({ restaurants, votes, currentUser, onVote, getTodayVotes, getR
       {/* Voting */}
       <div>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-2xl font-bold text-orange-900 flex items-center gap-2">
-            <Users size={24} />
-            오늘의 투표
-          </h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-2xl font-bold text-orange-900 flex items-center gap-2">
+              <Users size={24} />
+              오늘의 투표
+            </h2>
+            <button
+              onClick={handleRefreshVotes}
+              disabled={isRefreshing}
+              className="bg-orange-500 text-white px-3 py-1.5 rounded-full font-semibold hover:bg-orange-600 transition-colors flex items-center gap-1 text-sm disabled:opacity-50"
+              title="투표 현황 새로고침"
+            >
+              <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
+              새로고침
+            </button>
+          </div>
           {topVotedRestaurants.length > 0 && (
             <div className="flex items-center gap-2 bg-yellow-100 px-4 py-2 rounded-full">
               <Trophy size={20} className="text-yellow-600" />
@@ -1301,52 +1386,187 @@ const ProfileView = ({ currentUser, restaurants, onPasswordChange }) => {
 };
 
 // HistoryView Component
-const HistoryView = ({ history, restaurants, users }) => {
+const HistoryView = ({ history, restaurants, users, currentUser, onRefreshHistory }) => {
+  const [isAdding, setIsAdding] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedRestaurant, setSelectedRestaurant] = useState('');
+
+  // 날짜별로 그룹화 (하루에 하나만 표시)
   const groupedHistory = history.reduce((acc, record) => {
     const date = record.date;
-    if (!acc[date]) acc[date] = [];
-    acc[date].push(record);
+    if (!acc[date]) {
+      acc[date] = record; // 첫 번째 기록만 저장
+    }
     return acc;
   }, {});
 
   const sortedDates = Object.keys(groupedHistory).sort((a, b) => new Date(b) - new Date(a));
 
+  // 관리자 - 히스토리 추가
+  const handleAddHistory = async () => {
+    if (!selectedRestaurant) {
+      alert('밥집을 선택해주세요');
+      return;
+    }
+
+    try {
+      // 모든 사용자에 대해 히스토리 추가
+      const usersSnapshot = await getDocs(collection(db, 'users'));
+      
+      for (const userDoc of usersSnapshot.docs) {
+        const historyId = `${selectedDate}_${userDoc.id}_manual_${Date.now()}`;
+        await setDoc(doc(db, 'history', historyId), {
+          date: selectedDate,
+          restaurantId: selectedRestaurant,
+          userId: userDoc.id,
+          timestamp: serverTimestamp(),
+          isManual: true
+        });
+      }
+
+      await onRefreshHistory();
+      setIsAdding(false);
+      setSelectedRestaurant('');
+      alert('히스토리가 추가되었습니다!');
+    } catch (error) {
+      console.error('Add history error:', error);
+      alert('히스토리 추가 중 오류가 발생했습니다');
+    }
+  };
+
+  // 관리자 - 특정 날짜의 모든 히스토리 삭제
+  const handleDeleteHistory = async (date) => {
+    if (!confirm(`${date}의 기록을 삭제하시겠습니까?`)) return;
+
+    try {
+      const historyToDelete = history.filter(h => h.date === date);
+      
+      for (const record of historyToDelete) {
+        await deleteDoc(doc(db, 'history', record.id));
+      }
+
+      await onRefreshHistory();
+      alert('히스토리가 삭제되었습니다!');
+    } catch (error) {
+      console.error('Delete history error:', error);
+      alert('히스토리 삭제 중 오류가 발생했습니다');
+    }
+  };
+
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold text-orange-900">히스토리</h2>
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-orange-900 flex items-center gap-2">
+          <Calendar size={24} />
+          히스토리
+        </h2>
+        {currentUser.isAdmin && (
+          <button
+            onClick={() => setIsAdding(!isAdding)}
+            className="bg-orange-500 text-white px-4 py-2 rounded-full font-semibold hover:bg-orange-600 transition-colors flex items-center gap-2"
+          >
+            {isAdding ? <X size={20} /> : <Plus size={20} />}
+            {isAdding ? '취소' : '기록 추가'}
+          </button>
+        )}
+      </div>
 
+      {/* 관리자 - 히스토리 추가 폼 */}
+      {currentUser.isAdmin && isAdding && (
+        <div className="bg-white rounded-2xl p-6 shadow-lg border-2 border-orange-200">
+          <h3 className="font-bold text-orange-900 mb-4">새 기록 추가</h3>
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="block text-sm font-semibold text-orange-900 mb-2">날짜</label>
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="w-full px-3 py-2 border-2 border-orange-200 rounded-lg focus:border-orange-400 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-orange-900 mb-2">밥집</label>
+              <select
+                value={selectedRestaurant}
+                onChange={(e) => setSelectedRestaurant(e.target.value)}
+                className="w-full px-3 py-2 border-2 border-orange-200 rounded-lg focus:border-orange-400 focus:outline-none"
+              >
+                <option value="">선택하세요</option>
+                {restaurants.map(restaurant => (
+                  <option key={restaurant.id} value={restaurant.id}>
+                    {restaurant.emoji} {restaurant.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <button
+            onClick={handleAddHistory}
+            className="w-full bg-orange-500 text-white py-2 rounded-lg font-semibold hover:bg-orange-600 transition-colors"
+          >
+            추가하기
+          </button>
+        </div>
+      )}
+
+      {/* 히스토리 목록 */}
       <div className="space-y-4">
         {sortedDates.length === 0 ? (
           <div className="text-center py-12 text-orange-600">
             아직 기록이 없습니다
           </div>
         ) : (
-          sortedDates.map(date => (
-            <div key={date} className="bg-white rounded-2xl p-6 shadow-lg border-2 border-orange-100">
-              <h3 className="font-bold text-orange-900 mb-4">{date}</h3>
-              <div className="flex flex-wrap gap-4">
-                {groupedHistory[date].map((record, idx) => {
-                  const restaurant = restaurants.find(r => r.id === record.restaurantId);
-                  const user = users.find(u => u.id === record.userId);
-                  
-                  if (!restaurant) return null;
+          sortedDates.map(date => {
+            const record = groupedHistory[date];
+            const restaurant = restaurants.find(r => r.id === record.restaurantId);
+            
+            if (!restaurant) return null;
 
-                  return (
-                    <div
-                      key={idx}
-                      className="flex items-center gap-3 bg-orange-50 px-4 py-2 rounded-xl"
+            return (
+              <div key={date} className="bg-white rounded-2xl p-6 shadow-lg border-2 border-orange-100">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-bold text-orange-900 text-lg">{date}</h3>
+                  {currentUser.isAdmin && (
+                    <button
+                      onClick={() => handleDeleteHistory(date)}
+                      className="text-red-500 hover:text-red-700 transition-colors"
+                      title="삭제"
                     >
-                      <div className="text-3xl">{restaurant.emoji}</div>
-                      <div>
-                        <div className="font-semibold text-orange-900">{restaurant.name}</div>
-                        <div className="text-sm text-orange-600">{user?.username}</div>
-                      </div>
+                      <X size={20} />
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-4 bg-gradient-to-r from-orange-50 to-amber-50 px-6 py-4 rounded-xl">
+                  <div className="text-5xl">{restaurant.emoji}</div>
+                  <div className="flex-1">
+                    <div className="text-2xl font-bold text-orange-900 mb-1">{restaurant.name}</div>
+                    <div className="flex gap-2 text-sm">
+                      <span className="bg-orange-100 text-orange-700 px-2 py-1 rounded-full">
+                        {restaurant.category}
+                      </span>
+                      <span className="bg-amber-100 text-amber-700 px-2 py-1 rounded-full">
+                        {restaurant.heaviness}
+                      </span>
+                      <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full">
+                        {'₩'.repeat(restaurant.price)}
+                      </span>
                     </div>
-                  );
-                })}
+                    {record.isAutomatic && (
+                      <div className="mt-2 text-xs text-orange-600">
+                        🤖 자동 선택됨 ({record.voteCount || 0}표)
+                      </div>
+                    )}
+                    {record.isManual && (
+                      <div className="mt-2 text-xs text-orange-600">
+                        ✍️ 관리자가 추가함
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
